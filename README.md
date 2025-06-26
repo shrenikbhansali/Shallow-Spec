@@ -52,6 +52,12 @@ python allocation.py --outdir /home/ma-user/work/Data/
 python start_train.py
 ```
 
+#### Shallow-Gradient-Path Fine-Tuning
+
+```
+torchrun --standalone --nproc_per_node=8 train_sgp.py --model_name <model> --exit_layer 6
+```
+
 
 #### Inference
 
