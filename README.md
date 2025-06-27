@@ -43,7 +43,7 @@ We follow the training procedure of [Medusa](https://github.com/FasterDecoding/M
 
 ```python
 cd data
-python allocation.py --outdir ./output
+python allocation.py --outdir /home/ma-user/work/Data/
 ```
 
 2. training
@@ -55,10 +55,8 @@ python start_train.py
 #### Shallow-Gradient-Path Fine-Tuning
 
 ```
-python train_sgp.py --model_name <model> --exit_layer 6
+torchrun --standalone --nproc_per_node=8 train_sgp.py --model_name <model> --exit_layer 6
 ```
-The script downloads **databricks/databricks-dolly-15k** automatically and trains
-a LoRA adapter on the chosen model.
 
 
 #### Inference
