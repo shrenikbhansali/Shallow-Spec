@@ -2,7 +2,7 @@ import os, torch, shutil, glob, time
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--data_home", type=str, default="/home/ma-user/work/Data/")
+parser.add_argument("--data_home", type=str, default="/home/heck2/sbhansali8/Shallow-Spec/data/test/Data/")
 parser.add_argument("--start_epoch", type=int, default=0)
 parser.add_argument("--end_epoch", type=int, default=20)
 parser.add_argument("--bs", type=int, default=4)
@@ -35,7 +35,7 @@ for epoch in range(args.start_epoch, args.end_epoch):
         --num_machines {nnodes} --num_processes {processes} --main_process_ip {MASTER_ADDR} \
             --main_process_port {MASTER_PORT+epoch} --machine_rank {rank} --mixed_precision=fp16 train.py \
                 --start {epoch} --tmpdir {dst_dir} --cpdir {LOCAL_CKPT_DATA} \
-                    --basepath /cache/CKPT/vicuna-7b-v1.3/ --configpath ./data/vicuna_7B_config.json \
+                    --basepath lmsys/vicuna-7b-v1.3 \
                         --bs {args.bs} --lr {args.lr} --exit_layer {args.exit_layer}"
 
     print(command)

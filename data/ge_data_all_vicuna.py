@@ -19,7 +19,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 from fastchat.model.model_adapter import get_conversation_template
 
-bigname="/cache/CKPT/vicuna-7b-v1.3/"
+bigname="lmsys/vicuna-7b-v1.3"
 
 def longest_common_prefix(list1, list2):
     prefix_length = 0
@@ -38,9 +38,9 @@ def longest_common_prefix(list1, list2):
 def build_dataset_rank(
         tokenizer, split="train",
         select=None,
-        data_path = "/cache/CKPT/ShareGPT_V4.3_unfiltered_cleaned_split.json"
+        data_path = "Aeala/ShareGPT_Vicuna_unfiltered"
 ):
-    ds = load_dataset('json', data_files=data_path)
+    ds = load_dataset(data_path)
     
     ds = ds['train']
     ds = ds.shuffle(seed=42)

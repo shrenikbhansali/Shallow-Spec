@@ -1,7 +1,6 @@
 import argparse
 parser = argparse.ArgumentParser(description='sp')
 parser.add_argument('--basepath', type=str, default='')
-parser.add_argument('--configpath', type=str, default="config.json")
 parser.add_argument('--lr', type=float, default=3e-5)
 parser.add_argument('--bs', type=int, default=4)
 parser.add_argument("--exit_layer", type=str, default='2')
@@ -26,7 +25,6 @@ train_config = {
     "residual": "true,norm",
     "max_len": 2048,
     # During training, truncating the training sequences means that the larger the setting, the more training data is used, and the better the effect, but it also consumes more VRAM.
-    "config_path": args.configpath,
     "b1": 0.9,
     "b2": 0.95,
     "grad_clip": 0.5,
@@ -64,30 +62,21 @@ if accelerator.is_main_process:
 
 baseconfig = AutoConfig.from_pretrained(args.basepath)
 
+from transformers import AutoModelForCausalLM
+
+# Load model
+model_causal = AutoModelForCausalLM.from_pretrained(args.basepath)
+
+# Initialize your separate head
 head = torch.nn.Linear(baseconfig.hidden_size, baseconfig.vocab_size, bias=False)
 
-try:
-    with open(os.path.join(args.basepath, "model.safetensors.index.json"), "r") as f:
-        index_json = json.loads(f.read())
-        head_path = index_json["weight_map"]["lm_head.weight"]
-    with safe_open(os.path.join(args.basepath, head_path),
-                   framework="pt",
-                   device="cpu") as f:
-        tensor_slice = f.get_slice("lm_head.weight")
-        vocab_size, hidden_dim = tensor_slice.get_shape()
-        tensor = tensor_slice[:, :hidden_dim].float()
-except:
-    with open(os.path.join(args.basepath, "pytorch_model.bin.index.json"), "r") as f:
-        index_json = json.loads(f.read())
-        head_path = index_json["weight_map"]["lm_head.weight"]
-    weights = torch.load(os.path.join(args.basepath, head_path))
-    tensor = weights["lm_head.weight"].float()
-
-head.weight.data = tensor
+# Copy the weights
+head.weight.data = model_causal.lm_head.weight.data.clone()
 head.eval()
 
 for param in head.parameters():
     param.requires_grad = False
+
 
 def list_files(path):
     datapath = []
@@ -221,7 +210,7 @@ if accelerator.is_main_process:
     if not os.path.exists(args.cpdir):
         os.makedirs(args.cpdir)
 
-config = AutoConfig.from_pretrained(train_config["config_path"])
+config = AutoConfig.from_pretrained(args.basepath)
 model = AdapterModel(config)
 
 optimizer = optim.AdamW(model.parameters(), lr=train_config["lr"], betas=(train_config["b1"], train_config["b2"]))
