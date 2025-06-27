@@ -1,7 +1,8 @@
 import argparse
 
 parser = argparse.ArgumentParser(description='sp')
-parser.add_argument('--outdir', type=str, default='/home/ma-user/work/Data/')
+# default output directory no longer assumes a fixed absolute path
+parser.add_argument('--outdir', type=str, default='./output')
 args = parser.parse_args()
 
 import os
