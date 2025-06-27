@@ -69,13 +69,13 @@ def speed(jsonl_file, jsonl_file_base, tokenizer, task=None, report=True):
 
 
 def get_single_speedup(jsonl_file, jsonl_file_base):
-    tokenizer_path="/cache/CKPT/vicuna-7b-v1.3/"
+    tokenizer_path="lmsys/vicuna-7b-v1.3"
     for subtask_name in ["mt_bench", "translation", "summarization", "qa", "math_reasoning", "rag", "overall"]:
         speed(jsonl_file, jsonl_file_base, tokenizer_path, task=subtask_name)
 
 
 def get_mean_speedup():
-    tokenizer_path="/cache/CKPT/vicuna-7b-v1.3/"
+    tokenizer_path="lmsys/vicuna-7b-v1.3"
     jsonl_file_name = "vicuna-7b-v1.3-lade-level-5-win-7-guess-7-float16.jsonl"
     jsonl_file_base_name = "vicuna-7b-v1.3-vanilla-float16-temp-0.0.jsonl"
     jsonl_file_run_list = [
