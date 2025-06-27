@@ -4,6 +4,9 @@ import torch
 
 
 def build(tokenizer, batch: int, seq: int):
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
     ds = load_dataset("databricks/databricks-dolly-15k", split="train")
 
     def _format(example):

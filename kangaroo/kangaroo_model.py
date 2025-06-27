@@ -3,6 +3,7 @@ import json
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
+from safetensors.torch import load_file as safe_load
 
 from fastchat.utils import str_to_torch_dtype
 from transformers.models.llama import LlamaConfig
@@ -31,17 +32,18 @@ class KangarooModel(nn.Module):
 
         self.exit_layer = EARLY_STOP_LAYER
 
-        config = LlamaConfig.from_pretrained(adapter_model_path)
+        config = LlamaConfig.from_pretrained(base_model_name_or_path)
         self.adapter_model = AdapterModel(config)
 
-        if os.path.isdir(adapter_model_path):
-            adapter_weights = os.path.join(adapter_model_path, "pytorch_model.bin")
-        else:
-            adapter_weights = hf_hub_download(adapter_model_path, "pytorch_model.bin")
+        if adapter_model_path is not None:
+            if os.path.isdir(adapter_model_path):
+                adapter_weights = os.path.join(adapter_model_path, "pytorch_model.bin")
+            else:
+                adapter_weights = hf_hub_download(adapter_model_path, "pytorch_model.bin")
 
-        self.adapter_model.load_state_dict(
-            torch.load(adapter_weights, map_location="cpu"), strict=False
-        )
+            self.adapter_model.load_state_dict(
+                torch.load(adapter_weights, map_location="cpu"), strict=False
+            )
         self.adapter_model = self.adapter_model.eval().to(self.base_model.device)
 
         if args.dtype == "float16":
@@ -49,21 +51,42 @@ class KangarooModel(nn.Module):
 
         self.head_model = torch.nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
+        head_path = None
         if os.path.isdir(base_model_name_or_path):
             index_file = os.path.join(base_model_name_or_path, "pytorch_model.bin.index.json")
+            if os.path.exists(index_file):
+                with open(index_file, "r") as f:
+                    index_json = json.loads(f.read())
+                    head_path = index_json["weight_map"]["lm_head.weight"]
         else:
-            index_file = hf_hub_download(base_model_name_or_path, "pytorch_model.bin.index.json")
+            try:
+                index_file = hf_hub_download(base_model_name_or_path, "pytorch_model.bin.index.json")
+                with open(index_file, "r") as f:
+                    index_json = json.loads(f.read())
+                    head_path = index_json["weight_map"]["lm_head.weight"]
+            except Exception:
+                head_path = None
 
-        with open(index_file, "r") as f:
-            index_json = json.loads(f.read())
-            head_path = index_json["weight_map"]["lm_head.weight"]
+        if head_path is None:
+            # fall back to single weight file
+            try:
+                head_path = "pytorch_model.bin"
+                if not os.path.isdir(base_model_name_or_path):
+                    hf_hub_download(base_model_name_or_path, head_path)
+            except Exception:
+                head_path = "model.safetensors"
+                if not os.path.isdir(base_model_name_or_path):
+                    hf_hub_download(base_model_name_or_path, head_path)
 
         if os.path.isdir(base_model_name_or_path):
             head_file = os.path.join(base_model_name_or_path, head_path)
         else:
             head_file = hf_hub_download(base_model_name_or_path, head_path)
 
-        weights = torch.load(head_file, map_location="cpu")
+        if head_file.endswith(".safetensors"):
+            weights = safe_load(head_file)
+        else:
+            weights = torch.load(head_file, map_location="cpu")
         tensor = weights["lm_head.weight"].float()
         self.head_model.weight.data = tensor
         self.head_model = self.head_model.eval().to(self.base_model.device)
