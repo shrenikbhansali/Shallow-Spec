@@ -2,7 +2,8 @@ import os, torch, shutil, glob, time
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--data_home", type=str, default="/home/heck2/sbhansali8/Shallow-Spec/data/test/Data/")
+parser.add_argument("--data_home", type=str, required=True,
+                    help="Path to training data (generated hidden states)")
 parser.add_argument("--start_epoch", type=int, default=0)
 parser.add_argument("--end_epoch", type=int, default=20)
 parser.add_argument("--bs", type=int, default=4)

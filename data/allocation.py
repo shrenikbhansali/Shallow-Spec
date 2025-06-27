@@ -1,7 +1,8 @@
 import argparse
 
-parser = argparse.ArgumentParser(description='sp')
-parser.add_argument('--outdir', type=str, default='/home/ma-user/work/Data/')
+parser = argparse.ArgumentParser(description='Preprocess data')
+parser.add_argument('--outdir', type=str, required=True,
+                    help='Output directory for processed data')
 args = parser.parse_args()
 
 import os

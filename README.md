@@ -43,7 +43,7 @@ We follow the training procedure of [Medusa](https://github.com/FasterDecoding/M
 
 ```python
 cd data
-python allocation.py --outdir /home/ma-user/work/Data/
+python allocation.py --outdir <output_path>
 ```
 
 2. training
@@ -54,8 +54,11 @@ python start_train.py
 
 #### Shallow-Gradient-Path Fine-Tuning
 
+Train a LoRA adapter on the [Databricks Dolly 15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k)
+dataset using any HuggingFace model:
+
 ```
-torchrun --standalone --nproc_per_node=8 train_sgp.py --model_name <model> --exit_layer 6
+python train_sgp.py --model_name <hf_model_name> --exit_layer 6
 ```
 
 
