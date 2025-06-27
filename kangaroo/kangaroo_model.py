@@ -25,7 +25,7 @@ class KangarooModel(nn.Module):
 
         self.exit_layer = EARLY_STOP_LAYER
 
-        config = LlamaConfig.from_pretrained(os.path.join(adapter_model_path, "config.json"))
+        config = LlamaConfig.from_pretrained(adapter_model_path)
         self.adapter_model = AdapterModel(config)
 
         self.adapter_model.load_state_dict(torch.load(os.path.join(adapter_model_path, "pytorch_model.bin"), map_location="cpu"), strict=False)
