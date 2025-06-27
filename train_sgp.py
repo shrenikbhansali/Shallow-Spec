@@ -27,7 +27,7 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
 
     dummy = argparse.Namespace(dtype="bfloat16")
-    model = KangarooModel(args.model_name, args.model_name, dummy, EARLY_STOP_LAYER=args.exit_layer)
+    model = KangarooModel(args.model_name, dummy, adapter_model_path=None, EARLY_STOP_LAYER=args.exit_layer)
     model.base_model = inject_lora(model.base_model, args.exit_layer)
     model.base_model.gradient_checkpointing_enable()
 

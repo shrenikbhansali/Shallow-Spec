@@ -15,9 +15,9 @@ class KangarooModel(nn.Module):
     def __init__(
             self,
             base_model_name_or_path,
-            adapter_model_path,
             args,
-            EARLY_STOP_LAYER = 2,
+            adapter_model_path=None,
+            EARLY_STOP_LAYER=2,
     ):
         super().__init__()
         self.base_model = EarlyExitLlamaForCausalLM.from_pretrained(base_model_name_or_path, torch_dtype=str_to_torch_dtype(args.dtype), device_map="auto", EARLY_STOP_LAYER = EARLY_STOP_LAYER)
@@ -25,29 +25,29 @@ class KangarooModel(nn.Module):
 
         self.exit_layer = EARLY_STOP_LAYER
 
-        config = LlamaConfig.from_pretrained(os.path.join(adapter_model_path, "config.json"))
-        self.adapter_model = AdapterModel(config)
+        config = self.base_model.config
 
-        self.adapter_model.load_state_dict(torch.load(os.path.join(adapter_model_path, "pytorch_model.bin"), map_location="cpu"), strict=False)
-        self.adapter_model = self.adapter_model.eval().to(self.base_model.device)
+        if adapter_model_path and os.path.isdir(adapter_model_path):
+            cfg_path = os.path.join(adapter_model_path, "config.json")
+            weight_path = os.path.join(adapter_model_path, "pytorch_model.bin")
+            if os.path.exists(cfg_path) and os.path.exists(weight_path):
+                aconfig = LlamaConfig.from_pretrained(cfg_path)
+                self.adapter_model = AdapterModel(aconfig)
+                self.adapter_model.load_state_dict(torch.load(weight_path, map_location="cpu"), strict=False)
+                self.adapter_model = self.adapter_model.eval().to(self.base_model.device)
+                if args.dtype == "float16":
+                    self.adapter_model = self.adapter_model.half()
+            else:
+                self.adapter_model = None
+        else:
+            self.adapter_model = None
 
-        if args.dtype == "float16":
-            self.adapter_model = self.adapter_model.half()
-
-        self.head_model = torch.nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        with open(os.path.join(base_model_name_or_path, "pytorch_model.bin.index.json"), "r") as f:
-            index_json = json.loads(f.read())
-            head_path = index_json["weight_map"]["lm_head.weight"]
-        weights = torch.load(os.path.join(base_model_name_or_path, head_path), map_location='cpu')
-        tensor = weights["lm_head.weight"].float()
-        self.head_model.weight.data = tensor
-        self.head_model = self.head_model.eval().to(self.base_model.device)
+        self.head_model = self.base_model.lm_head
 
         self.exit_proj = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.exit_proj.weight.data = tensor.clone()
+        self.exit_proj.weight.data = self.head_model.weight.data.clone()
 
         if args.dtype == "float16":
-            self.head_model = self.head_model.half()
             self.exit_proj = self.exit_proj.half()
 
     def forward(self, input_ids, labels=None, beta_exit=0.1, detach_exit=True):

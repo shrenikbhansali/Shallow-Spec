@@ -211,7 +211,7 @@ if __name__ == "__main__":
 
     question_file = f"data/question.jsonl"
 
-    model = KangarooModel(args.model_path, args.adapter_path, args, EARLY_STOP_LAYER = args.exitlayer)
+    model = KangarooModel(args.model_path, args, adapter_model_path=args.adapter_path, EARLY_STOP_LAYER=args.exitlayer)
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     do_sample = False
 

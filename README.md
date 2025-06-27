@@ -54,8 +54,10 @@ python start_train.py
 
 #### Shallow-Gradient-Path Fine-Tuning
 
+Run SGP training directly from any HuggingFace Llama checkpoint. The example below fine tunes a 7B model using the Dolly-15k dataset and trains LoRA adapters on the first six layers:
+
 ```
-torchrun --standalone --nproc_per_node=8 train_sgp.py --model_name <model> --exit_layer 6
+python train_sgp.py --model_name meta-llama/Llama-2-7b-hf --exit_layer 6
 ```
 
 
