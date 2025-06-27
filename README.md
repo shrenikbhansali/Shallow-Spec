@@ -66,15 +66,15 @@ torchrun --standalone --nproc_per_node=8 train_sgp.py --model_name <model> --exi
 ## Vicuna-7B as an example
 
 ## Vanilla decoding
-CUDA_VISIBLE_DEVICES=0 python -m evaluation.inference_baseline --model-path "/cache/CKPT/vicuna-7b-v1.3" --model-id "vicuna-7b-v1.3-vanilla-float16-temp-0.0" --bench-name "Kangaroo" --temperature 0.0 --dtype "float16"
+CUDA_VISIBLE_DEVICES=0 python -m evaluation.inference_baseline --model-path lmsys/vicuna-7b-v1.3 --model-id "vicuna-7b-v1.3-vanilla-float16-temp-0.0" --bench-name "Kangaroo" --temperature 0.0 --dtype "float16"
 
 ## Kangaroo
-CUDA_VISIBLE_DEVICES=0 python -m evaluation.inference_kangaroo --adapter-path "/cache/CKPT/kangaroo-vicuna-7b-v1.3" --exitlayer 2 --model-path "/cache/CKPT/vicuna-7b-v1.3" --threshold 0.6 --steps 6 --model-id "vicuna-7b-v1.3-kangaroo-thres-0.6-steps-6-float16" --bench-name "Kangaroo" --dtype "float16"
+CUDA_VISIBLE_DEVICES=0 python -m evaluation.inference_kangaroo --adapter-path SafeAILab/kangaroo-vicuna-7b-v1.3 --exitlayer 2 --model-path lmsys/vicuna-7b-v1.3 --threshold 0.6 --steps 6 --model-id "vicuna-7b-v1.3-kangaroo-thres-0.6-steps-6-float16" --bench-name "Kangaroo" --dtype "float16"
 ```
 
 To get the detailed speed information, run ``python evaluation/speed.py``.
 
-The corresponding huggingface ckpts of kangaroo can be downloaded at [Kangaroo Google Drive](https://drive.google.com/drive/folders/1_lSqhasWeIUyfCft50JtKuQ2-TWepm8p?usp=sharing).
+The official Kangaroo checkpoints are hosted on [Hugging Face](https://huggingface.co/SafeAILab).
 
 
 #### Citation

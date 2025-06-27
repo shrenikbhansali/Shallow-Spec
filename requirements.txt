@@ -6,3 +6,4 @@ openai
 sentencepiece
 peft
 datasets
+huggingface_hub
