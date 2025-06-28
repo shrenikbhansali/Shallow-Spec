@@ -31,26 +31,36 @@ def main():
     model.base_model = inject_lora(model.base_model, args.exit_layer)
     model.base_model.gradient_checkpointing_enable()
 
-    dataloader = build_dataloader(tokenizer, args.per_device_batch, seq=tokenizer.model_max_length or 512)
-
     accelerator = Accelerator(mixed_precision="bf16")
-    model, dataloader = accelerator.prepare(model, dataloader)
 
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=2e-4)
+    model = accelerator.prepare(model)
+
+    dataloader = build_dataloader(tokenizer, args.per_device_batch, seq=1024)
+
+    dataloader = accelerator.prepare_data_loader(dataloader)
+
+    optimizer = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()), lr=2e-4
+    )
 
     for epoch in range(args.epochs):
         model.train()
         total_loss = 0.0
         for batch in dataloader:
             with accelerator.accumulate(model):
-                outputs = model(batch["input_ids"], labels=batch["labels"], beta_exit=args.beta_exit, detach_exit=args.detach_exit)
+                outputs = model(
+                    batch["input_ids"],
+                    labels=batch["labels"],
+                    beta_exit=args.beta_exit,
+                    detach_exit=args.detach_exit,
+                )
                 loss = outputs[0]
                 accelerator.backward(loss)
                 optimizer.step()
                 optimizer.zero_grad()
                 total_loss += loss.item()
         if accelerator.is_main_process:
-            print(f"Epoch {epoch}: loss {total_loss/len(dataloader):.4f}")
+            print(f"Epoch {epoch}: loss {total_loss / len(dataloader):.4f}")
 
     if accelerator.is_main_process:
         os.makedirs("checkpoints/sgp", exist_ok=True)

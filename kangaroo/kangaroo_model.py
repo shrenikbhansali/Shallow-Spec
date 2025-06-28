@@ -10,7 +10,7 @@ from transformers.models.llama import LlamaConfig
 
 from kangaroo.adapter import AdapterModel
 from kangaroo.earlyexit import EarlyExitLlamaForCausalLM
-from transformers.models.llama.modeling_llama import create_causal_mask
+
 import torch.nn.functional as F
 
 
@@ -27,7 +27,7 @@ class KangarooModel(nn.Module):
         self.base_model = EarlyExitLlamaForCausalLM.from_pretrained(
             base_model_name_or_path,
             torch_dtype=str_to_torch_dtype(args.dtype),
-            device_map="auto",
+            # device_map="auto",
             EARLY_STOP_LAYER=EARLY_STOP_LAYER,
         )
         self.base_model = self.base_model.eval()
@@ -43,7 +43,7 @@ class KangarooModel(nn.Module):
             else:
                 adapter_weights = hf_hub_download(adapter_model_path, "pytorch_model.bin")
 
-            self.adapter_model.load_state_dict(torch.load(adapter_weights, map_location="cpu"), strict=False)
+            self.adapter_model.load_state_dict(torch.load(adapter_weights), strict=False)
         self.adapter_model = self.adapter_model.eval().to(self.base_model.device)
 
         if args.dtype == "float16":
@@ -86,13 +86,14 @@ class KangarooModel(nn.Module):
         if head_file.endswith(".safetensors"):
             weights = safe_load(head_file)
         else:
-            weights = torch.load(head_file, map_location="cpu")
+            weights = torch.load(head_file)
         tensor = weights["lm_head.weight"].float()
         self.head_model.weight.data = tensor
         self.head_model = self.head_model.eval().to(self.base_model.device)
 
         self.exit_proj = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.exit_proj.weight.data = tensor.clone()
+        self.exit_proj = self.exit_proj.eval().to(self.base_model.device)
 
         if args.dtype == "float16":
             self.head_model = self.head_model.half()
@@ -112,64 +113,66 @@ class KangarooModel(nn.Module):
         detach_exit: bool
             Whether to detach the hidden state before the final layers.
         """
-
-        model = self.base_model.model
+        model = self.base_model.model            # type: LlamaModel
         device = input_ids.device
+        self.exit_proj = self.exit_proj.to(device)
+        self.head_model = self.head_model.to(device)
+
         bsz, seq_len = input_ids.shape
 
-        inputs_embeds = model.embed_tokens(input_ids)
+        # 1) Embed tokens
+        inputs_embeds = model.model.embed_tokens(input_ids)
 
+        # 2) Build masks
+        # attention_mask: (bsz, seq_len) of all True
         attention_mask = torch.ones((bsz, seq_len), dtype=torch.bool, device=device)
-        cache_pos = torch.arange(seq_len, device=device)
-        causal_mask = create_causal_mask(
-            config=model.config,
-            input_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            cache_position=cache_pos,
-            past_key_values=None,
-        )
+        # causal_mask: (1, 1, seq_len, seq_len) lower‐triangular
+        causal_mask = torch.tril(
+            torch.ones((seq_len, seq_len), dtype=torch.bool, device=device)
+        ).unsqueeze(0).unsqueeze(0)
 
-        position_ids = cache_pos.unsqueeze(0)
-        pos_embeds = model.rotary_emb(inputs_embeds, position_ids)
+        # 3) Position IDs and RoPE embeddings
+        # position_ids: (1, seq_len)
+        position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+        # position_embeddings: Tuple(cos, sin), each (bsz, seq_len, head_dim)
+        position_embeddings = model.model.rotary_emb(inputs_embeds, position_ids)
 
+        # 4) Early layers (trainable / gradient path)
         hidden_states = inputs_embeds
-        for layer in model.layers[: self.exit_layer + 1]:
-            layer_outputs = layer(
+        for layer in model.model.layers[: self.exit_layer + 1]:
+            hidden_states = layer(
                 hidden_states,
                 attention_mask=causal_mask,
                 position_ids=position_ids,
                 past_key_value=None,
                 output_attentions=False,
                 use_cache=False,
-                cache_position=cache_pos,
-                position_embeddings=pos_embeds,
-            )
-            hidden_states = layer_outputs[0]
-
+                position_embeddings=position_embeddings,
+            )[0]
         exit_hidden = hidden_states
 
+        # 5) Optionally detach for deep (frozen) layers
         hidden_final_input = exit_hidden.detach() if detach_exit else exit_hidden
+
         with torch.no_grad():
             hidden_states = hidden_final_input
-            for layer in model.layers[self.exit_layer + 1 :]:
-                layer_outputs = layer(
+            for layer in model.model.layers[self.exit_layer + 1:]:
+                hidden_states = layer(
                     hidden_states,
                     attention_mask=causal_mask,
                     position_ids=position_ids,
                     past_key_value=None,
                     output_attentions=False,
                     use_cache=False,
-                    cache_position=cache_pos,
-                    position_embeddings=pos_embeds,
-                )
-                hidden_states = layer_outputs[0]
-            hidden_states = model.norm(hidden_states)
+                    position_embeddings=position_embeddings,
+                )[0]
+            hidden_states = model.model.norm(hidden_states)
 
+        # 6) Compute logits and losses
         draft_logits = self.exit_proj(exit_hidden)
         final_logits = self.head_model(hidden_states)
 
-        loss_exit = None
-        loss_main = None
+        loss_main = loss_exit = None
         if labels is not None:
             loss_main = F.cross_entropy(
                 final_logits.view(-1, final_logits.size(-1)),
