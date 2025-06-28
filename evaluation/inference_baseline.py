@@ -10,6 +10,7 @@ from fastchat.utils import str_to_torch_dtype
 from evaluation.eval import run_eval, reorg_answer_file
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
 
 def baseline_forward(inputs, model, tokenizer, max_new_tokens, temperature=0.0, do_sample=False):
     input_ids = inputs.input_ids
@@ -78,6 +79,12 @@ if __name__ == "__main__":
         help="The temperature for medusa sampling.",
     )
     parser.add_argument(
+        "--ckpt_dir",
+        type=str,
+        default=None,
+        help="Path to LoRA weights for PEFT evaluation.",
+    )
+    parser.add_argument(
         "--dtype",
         type=str,
         default="float16",
@@ -96,6 +103,11 @@ if __name__ == "__main__":
         low_cpu_mem_usage=True,
         device_map="auto"
     )
+
+    if args.ckpt_dir:
+        model = PeftModel.from_pretrained(model, args.ckpt_dir)
+        # In evaluation we don't train, so enable evaluation mode
+        model = model.merge_and_unload()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
 
