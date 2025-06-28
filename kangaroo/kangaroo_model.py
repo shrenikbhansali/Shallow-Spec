@@ -154,7 +154,21 @@ class KangarooModel(nn.Module):
         # 5) Optionally detach for deep (frozen) layers
         hidden_final_input = exit_hidden.detach() if detach_exit else exit_hidden
 
-        with torch.no_grad():
+        if detach_exit:
+            with torch.no_grad():
+                hidden_states = hidden_final_input
+                for layer in model.model.layers[self.exit_layer + 1:]:
+                    hidden_states = layer(
+                        hidden_states,
+                        attention_mask=causal_mask,
+                        position_ids=position_ids,
+                        past_key_value=None,
+                        output_attentions=False,
+                        use_cache=False,
+                        position_embeddings=position_embeddings,
+                    )[0]
+                hidden_states = model.model.norm(hidden_states)
+        else:
             hidden_states = hidden_final_input
             for layer in model.model.layers[self.exit_layer + 1:]:
                 hidden_states = layer(
