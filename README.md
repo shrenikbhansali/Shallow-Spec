@@ -104,3 +104,9 @@ We acknowledge the authors of
 ### License
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+### One-command SGP experiment
+```bash
+python run_sgp_experiment.py --model_name lmsys/vicuna-7b-v1.3
+```
+
