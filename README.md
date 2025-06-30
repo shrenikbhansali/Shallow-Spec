@@ -1,56 +1,60 @@
-We build ontop of the following codebase: Kangaroo: Lossless Self-Speculative Decoding via Double Early Exiting</h1></div>
+<img src="imgs/logo.png" alt="Kangaroo" width="100" align="left"><div align="center"><h1>&nbsp;Kangaroo: Lossless Self-Speculative Decoding via Double Early Exiting</h1></div>
+
+<p align="center">
+| <a href="https://arxiv.org/abs/2404.18911"><b>Arxiv Paper</b></a> |
+</p>
 
 
+<p align="center">
+  <a href="">
+    <img src="https://img.shields.io/badge/Version-v0.0.1-orange.svg" alt="Version">
+  </a>
+  <a href="https://github.com/SafeAILab/EAGLE/pulls">
+    <img src="https://img.shields.io/badge/Contributions-welcome-brightgreen.svg?style=flat" alt="Contributions welcome">
+  </a>
+</p>
 
-## This is their explanation / Kangaroo:
+<br/>
 
+Drawing inspiration from early exiting, we propose a novel
 self-speculative decoding framework Kangaroo, which uses a fixed shallow sub-network as a self-draft model, with the remaining layers serving as the larger target model. We train a lightweight and efficient adapter module on top of the sub-network to bridge the gap between the sub-network and the full model’s representation ability. The adapter network consists of only one multi-head attention and two
 normalization layers. Surprisingly, we find this simple design efficient but powerful. To further reduce the inference latency of the self-draft model, we introduce an additional early exiting mechanism for generating draft tokens, aiming to avoid
 unnecessary costs on more difficult tokens.
 
-
-##  We implement shallow-gradient propagation (SGP)
-
-In normal fine-tuning, the loss is computed on the **final** decoder layer; the gradient must flow backward through the entire stack. For very deep models this gradient can become weak or noisy by the time it reaches the earliest blocks (vanishing-/sparse-gradient problem).
-
-**SGP** inserts an **auxiliary early-exit head** after a shallow layer **L** (here `exit_layer = 6`).
-During training we:
-
-* **Freeze** every base weight (so we never disturb the pretrained representation).
-* Add **LoRA adapters** only to layers 0 … L.
-* Compute two losses
-
-  * `loss_exit` on the logits produced by the early-exit head (always back-propagated).
-  * `loss_main` on the final head.
-* **Detach** the hidden state that feeds the later layers (`detach_exit=True`), so `loss_main` does **not** back-prop through layers 0 … L.
-
-  ```python
-  hidden_final_input = exit_hidden.detach()   # gradient stops here
-  ```
-
-  Therefore the *only* gradients reaching layers 0 … L come from `loss_exit`; the path is short (≤ L + 1 layers) → **shallow-gradient path**.
-
----
-
-### How the code is organized
-Note that the main branch only has the training pipeline - the other branch has the experimental / eval pipeline, which is WIP
-
-| Component                        | Where                                      | Key line(s)                                                                   |
-| -------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------- |
-| **Early-exit head**              | `kangaroo_model.py` → `self.exit_proj`     | `draft_logits = self.exit_proj(exit_hidden)`                                  |
-| **LoRA injection on layers ≤ L** | `inject_lora()`                            | Checks layer index before enabling `requires_grad=True`.                      |
-| **Detach flag**                  | `kangaroo_model.forward()`                 | `exit_hidden.detach() if detach_exit else exit_hidden`                        |
-| **Optimizer**                    | `train_sgp.py`                             | Filters `p.requires_grad`, so *only* LoRA matrices + exit head are trainable. |
-| **Combined loss**                | `loss = loss_main + beta_exit * loss_exit` | With `beta_exit = 0.7` we emphasise the shallow path.                         |
-
-Because the verifier layers (`> L`) run under the detached hidden state, they are **frozen**: no gradients, no weight updates, no extra memory.
+<p align="center">
+  <img src="imgs/kangaroo.png" >
+</p>
+<p align="center">
+</p>
 
 
-## Running the code
+#### TODO List
+- [X] inference code & checkpoints of Kangaroo.
+- [X] code for training Kangaroo.
+- [ ] tree verification.
+- [ ] bsz > 1 and decoding with sampling.
 
-#### Running Shallow-Gradient-Path Fine-Tuning
+#### Training
 
-We train a LoRA adapter on the [Databricks Dolly 15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k)
+We follow the training procedure of [Medusa](https://github.com/FasterDecoding/Medusa#medusa-simple-framework-for-accelerating-llm-generation-with-multiple-decoding-heads) and [Eagle](https://github.com/SafeAILab/EAGLE?tab=readme-ov-file).
+
+
+1. data preprocess
+
+```python
+cd data
+python allocation.py --outdir <output_path>
+```
+
+2. training
+
+```
+python start_train.py
+```
+
+#### Shallow-Gradient-Path Fine-Tuning
+
+Train a LoRA adapter on the [Databricks Dolly 15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k)
 dataset using any HuggingFace model:
 
 ```
@@ -58,19 +62,51 @@ python train_sgp.py --model_name <hf_model_name> --exit_layer 6
 ```
 
 
-#### Evaluating an SGP Run:
-This runs the evaluation scrip (WIP), which checks perplexity, token acceptance rate, and throughput
-At some point, we need to be evaluating using specbench, since that's the literature standard at this point 
-```
-python evaluation/sgp_eval.py \
-  --ckpt_dir checkpoints/sgp_adapter \
-  --model_name meta-llama/Llama-2-7b-hf \
-  --exit_layer 6 \
-  --n_samples 64
+#### Inference
+
+
+```python
+## Vicuna-7B as an example
+
+## Vanilla decoding
+CUDA_VISIBLE_DEVICES=0 python -m evaluation.inference_baseline --model-path lmsys/vicuna-7b-v1.3 --model-id "vicuna-7b-v1.3-vanilla-float16-temp-0.0" --bench-name "Kangaroo" --temperature 0.0 --dtype "float16"
+
+## Kangaroo
+CUDA_VISIBLE_DEVICES=0 python -m evaluation.inference_kangaroo --adapter-path SafeAILab/kangaroo-vicuna-7b-v1.3 --exitlayer 2 --model-path lmsys/vicuna-7b-v1.3 --threshold 0.6 --steps 6 --model-id "vicuna-7b-v1.3-kangaroo-thres-0.6-steps-6-float16" --bench-name "Kangaroo" --dtype "float16"
 ```
 
-#### Running an end to end SGP-FT Experiment:
-This first fine-tunes the model with SGP (works), saves a model checkpoint locally, and then evaluates the model using the eval script from above
+To get the detailed speed information, run ``python evaluation/speed.py``.
+
+The official Kangaroo checkpoints are hosted on [Hugging Face](https://huggingface.co/SafeAILab).
+
+
+#### Citation
+
 ```
-python run_sgp_experiment.py --model_name meta-llama/Llama-2-7b-hf 
+@article{liu2024kangaroo,
+  title={Kangaroo: Lossless Self-Speculative Decoding via Double Early Exiting},
+  author={Liu, Fangcheng and Tang, Yehui and Liu, Zhenhua and Ni, Yunsheng and Han, Kai and Wang, Yunhe},
+  journal={arXiv preprint arXiv:2404.18911},
+  year={2024}
+}
 ```
+
+
+
+## Acknowledgements
+
+We acknowledge the authors of 
+
+* [Spec-Bench](https://github.com/hemingkx/Spec-Bench/tree/main) for the awesome benchmark.
+* [Medusa](https://github.com/FasterDecoding/Medusa#medusa-simple-framework-for-accelerating-llm-generation-with-multiple-decoding-heads) and [Eagle](https://github.com/SafeAILab/EAGLE?tab=readme-ov-file) for pioneer work.
+
+
+### License
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+### One-command SGP experiment
+```bash
+python run_sgp_experiment.py --model_name lmsys/vicuna-7b-v1.3
+```
+
