@@ -2,14 +2,14 @@ We build ontop of the following codebase: Kangaroo: Lossless Self-Speculative De
 
 
 
-### This is their explanation / Kangaroo:
+## This is their explanation / Kangaroo:
 
 self-speculative decoding framework Kangaroo, which uses a fixed shallow sub-network as a self-draft model, with the remaining layers serving as the larger target model. We train a lightweight and efficient adapter module on top of the sub-network to bridge the gap between the sub-network and the full model’s representation ability. The adapter network consists of only one multi-head attention and two
 normalization layers. Surprisingly, we find this simple design efficient but powerful. To further reduce the inference latency of the self-draft model, we introduce an additional early exiting mechanism for generating draft tokens, aiming to avoid
 unnecessary costs on more difficult tokens.
 
 
-###  We implement shallow-gradient propagation (SGP)
+##  We implement shallow-gradient propagation (SGP)
 
 In normal fine-tuning, the loss is computed on the **final** decoder layer; the gradient must flow backward through the entire stack. For very deep models this gradient can become weak or noisy by the time it reaches the earliest blocks (vanishing-/sparse-gradient problem).
 
@@ -45,7 +45,7 @@ During training we:
 Because the verifier layers (`> L`) run under the detached hidden state, they are **frozen**: no gradients, no weight updates, no extra memory.
 
 
-### Running the code
+## Running the code
 
 #### Running Shallow-Gradient-Path Fine-Tuning
 
