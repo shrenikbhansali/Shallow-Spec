@@ -45,8 +45,9 @@ During training we:
 Because the verifier layers (`> L`) run under the detached hidden state, they are **frozen**: no gradients, no weight updates, no extra memory.
 
 
+### Running the code
 
-#### Shallow-Gradient-Path Fine-Tuning
+#### Running Shallow-Gradient-Path Fine-Tuning
 
 We train a LoRA adapter on the [Databricks Dolly 15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k)
 dataset using any HuggingFace model:
@@ -56,3 +57,19 @@ python train_sgp.py --model_name <hf_model_name> --exit_layer 6
 ```
 
 
+#### Evaluating an SGP Run:
+This runs the evaluation scrip (WIP), which checks perplexity, token acceptance rate, and throughput
+At some point, we need to be evaluating using specbench, since that's the literature standard at this point 
+```
+python evaluation/sgp_eval.py \
+  --ckpt_dir checkpoints/sgp_adapter \
+  --model_name meta-llama/Llama-2-7b-hf \
+  --exit_layer 6 \
+  --n_samples 64
+```
+
+#### Running an end to end SGP-FT Experiment:
+This first fine-tunes the model with SGP (works), saves a model checkpoint locally, and then evaluates the model using the eval script from above
+```
+python run_sgp_experiment.py --model_name meta-llama/Llama-2-7b-hf 
+```
