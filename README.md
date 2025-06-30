@@ -33,6 +33,7 @@ During training we:
 ---
 
 ### How the code is organized
+Note that the main branch only has the training pipeline - the other branch has the experimental / eval pipeline, which is WIP
 
 | Component                        | Where                                      | Key line(s)                                                                   |
 | -------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------- |
