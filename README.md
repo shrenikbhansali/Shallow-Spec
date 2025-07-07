@@ -45,6 +45,10 @@ Note that the main branch only has the training pipeline - the other branch has 
 
 Because the verifier layers (`> L`) run under the detached hidden state, they are **frozen**: no gradients, no weight updates, no extra memory.
 
+Dual LoRA adapters can be injected with `inject_dual_lora()`. Both `lora_S` and
+`lora_D` are active by default. Use `enable_lora_grads(model, "lora_S", True)`
+to unfreeze the shallow adapter while keeping the deep one frozen.
+
 
 ## Running the code
 
