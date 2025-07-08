@@ -4,6 +4,6 @@ accelerate
 fschat
 openai
 sentencepiece
-peft
+peft>=0.6.0
 datasets
 huggingface_hub
