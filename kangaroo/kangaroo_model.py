@@ -99,6 +99,10 @@ class KangarooModel(nn.Module):
             self.head_model = self.head_model.half()
             self.exit_proj = self.exit_proj.half()
 
+        # Bind heads so spec_decode_step always finds them
+        self.base_model.exit_proj = self.exit_proj
+        self.base_model.head_model = self.head_model
+
     def forward(self, input_ids, labels=None, beta_exit=0.1, detach_exit=True):
         """Run the model with an early-exit head.
 

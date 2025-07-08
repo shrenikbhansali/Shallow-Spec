@@ -1,6 +1,18 @@
+from __future__ import annotations
+
+from typing import NamedTuple
+
 import torch
-from typing import List, Optional, Tuple, Union
 from transformers.models.llama import LlamaForCausalLM
+
+
+class SpecStep(NamedTuple):
+    """Data for a single speculative decoding step."""
+
+    hidden: torch.Tensor
+    logits: torch.Tensor
+    accept: torch.Tensor
+    token: torch.Tensor
 
 
 class EarlyExitLlamaForCausalLM(LlamaForCausalLM):
@@ -67,5 +79,52 @@ class EarlyExitLlamaForCausalLM(LlamaForCausalLM):
         
         if in_features_large is not None:
             return hidden_states, self.model.norm(hidden_states)
-        
         return hidden_states
+
+    @torch.no_grad()
+    def spec_decode_step(
+        self,
+        in_tokens_small: torch.LongTensor,
+        position_ids: torch.LongTensor,
+        exit_layer: int,
+        temperature: float = 1.0,
+    ) -> SpecStep:
+        """Generate one token using speculative decoding.
+
+        Args:
+            in_tokens_small: Input tokens of shape ``[B, 1]``.
+            position_ids: Position ids of shape ``[B, 1]``.
+            exit_layer: Index of the last draft layer.
+            temperature: Sampling temperature. ``0`` for greedy.
+
+        Returns:
+            SpecStep: hidden state, draft logits and accept flag.
+        """
+
+        self.early_exit_layer = exit_layer
+        assert hasattr(self, "exit_proj") and hasattr(self, "head_model")
+
+        exit_hidden = self.forward_draft_or_large_model(
+            in_tokens_small=in_tokens_small, position_ids=position_ids
+        )
+        draft_logits = self.exit_proj(exit_hidden).float()
+
+        if temperature == 0.0:
+            draft_token = torch.argmax(draft_logits[:, -1, :], dim=-1, keepdim=True)
+        else:
+            probs = torch.softmax(draft_logits[:, -1, :] / temperature, dim=-1)
+            draft_token = torch.multinomial(probs, num_samples=1)
+
+        _, deep_hidden = self.forward_draft_or_large_model(
+            in_features_large=exit_hidden, position_ids=position_ids
+        )
+        final_logits = self.head_model(deep_hidden).float()
+
+        accept = (final_logits.argmax(dim=-1, keepdim=True) == draft_token).to(torch.uint8)
+
+        return SpecStep(
+            hidden=exit_hidden.detach().cpu(),
+            logits=draft_logits.detach().cpu(),
+            accept=accept.cpu(),
+            token=draft_token.detach().cpu(),
+        )

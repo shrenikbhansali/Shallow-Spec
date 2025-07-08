@@ -11,14 +11,15 @@ from fastchat.utils import str_to_torch_dtype
 from evaluation.eval import run_eval, reorg_answer_file
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from kangaroo.kangaroo_model import KangarooModel
+from kangaroo.earlyexit import SpecStep
 
-def kangaroo_forward(inputs, model, tokenizer, max_new_tokens, do_sample=False, max_length = 2048, EARLY_STOP_LAYER = 2, SPECULATIVE_DECODING_STEPS = 6, threshold = 0.6):
+def kangaroo_forward(inputs, model, tokenizer, max_new_tokens, do_sample=False, max_length = 2048, EARLY_STOP_LAYER = 2, SPECULATIVE_DECODING_STEPS = 6, threshold = 0.6, return_trace: bool = False):
     context_tokens = inputs.input_ids
     device = context_tokens.device
     token_eos = tokenizer.eos_token_id
     batch_size, context_length = context_tokens.shape
     global_tokens = torch.ones((batch_size, max_length), dtype=torch.long, device=device) * token_eos
-    global_position_ids = torch.LongTensor([[i for i in range(max_length)]]).to(device)
+    global_position_ids = torch.arange(max_length, device=device).unsqueeze(0)
     accept_length_list = [1]
 
     start_index = context_length
@@ -27,15 +28,42 @@ def kangaroo_forward(inputs, model, tokenizer, max_new_tokens, do_sample=False, 
     # Init KV-chache and sample the first token
     with torch.no_grad():
         position_ids = global_position_ids[:, :start_index]
-        output = model.base_model(context_tokens, position_ids=position_ids, output_hidden_states=True)
+        output = model.base_model(context_tokens, position_ids=position_ids, output_hidden_states=True, use_cache=True)
         model.base_model.past_key_values = list(output.past_key_values)
         hidden_state = output.hidden_states[-1]
-        logits = output.logits # batchsize, input_length, vocab_size
+        logits = output.logits
         global_tokens[:, start_index] = torch.argmax(logits[:, -1, :], dim=-1).item()
         hidden_state_early = output.hidden_states[EARLY_STOP_LAYER]
 
         # KV-cache for the adapter
-        hidden_state, adapter_past_key_values = model.adapter_model.forward_early_stop(inputs_embeds=hidden_state_early[:,:,:], position_ids=global_position_ids[:, :context_length], use_cache=True) 
+        hidden_state, adapter_past_key_values = model.adapter_model.forward_early_stop(
+            inputs_embeds=hidden_state_early[:, :, :],
+            position_ids=global_position_ids[:, :context_length],
+            use_cache=True,
+        )
+
+    if return_trace:
+        trace: list[SpecStep] = []
+        token = global_tokens[:, start_index - 1 : start_index]
+        for _ in range(max_new_tokens):
+            pos_ids = global_position_ids[:, start_index - 1 : start_index]
+            step = model.base_model.spec_decode_step(
+                in_tokens_small=token,
+                position_ids=pos_ids,
+                exit_layer=EARLY_STOP_LAYER,
+                temperature=0.0 if not do_sample else 1.0,
+            )
+            trace.append(step)
+            token = step.token
+            global_tokens[:, start_index] = token.squeeze(-1)
+            start_index += 1
+            if token.item() == token_eos or start_index >= max_length:
+                break
+
+        output_ids = global_tokens[0, :start_index].tolist()
+        new_token = start_index - context_length - 1
+        idx = len(trace) - 1
+        return [output_ids], new_token, idx, [int(s.accept.item()) for s in trace], trace
 
     total_inference_steps = 0
 
