@@ -98,10 +98,13 @@ def main():
     total_acc, total_gen, total_time = 0, 0, 0.0
 
     for row in ds:
-        prompt = tok.decode(row["input_ids"].tolist(), skip_special_tokens=True)
+        # prompt = tok.decode(row["input_ids"].tolist(), skip_special_tokens=True)
 
         # Full BatchEncoding (with .input_ids) so inference util works
-        enc = tok(prompt, return_tensors="pt")
+        # enc = tok(prompt, return_tensors="pt")
+        from types import SimpleNamespace
+        input_ids = row["input_ids"].unsqueeze(0).to(device)
+        enc = SimpleNamespace(input_ids=input_ids)
         enc = enc.to(device)
 
         # 1️⃣  Prime KV-cache by running full forward once
