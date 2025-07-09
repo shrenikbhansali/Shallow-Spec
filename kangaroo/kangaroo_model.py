@@ -27,7 +27,7 @@ class KangarooModel(nn.Module):
         self.base_model = EarlyExitLlamaForCausalLM.from_pretrained(
             base_model_name_or_path,
             torch_dtype=str_to_torch_dtype(args.dtype),
-            # device_map="auto",
+            device_map="auto",
             EARLY_STOP_LAYER=EARLY_STOP_LAYER,
         )
         self.base_model = self.base_model.eval()

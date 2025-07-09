@@ -34,7 +34,7 @@ def parse_args():
     parser.add_argument(
         "--stream_dataset",
         type=str,
-        default="transformersbook/sharegpt",
+        default="RyokoAI/ShareGPT52K",
     )
     parser.add_argument("--max_prompts", type=int, default=None)
     return parser.parse_args()
