@@ -20,7 +20,7 @@ from transformers import AutoTokenizer
 
 
 def test_hidden_hook():
-    model_name = "hf-internal-testing/tiny-random-LlamaModel"
+    model_name = "meta-llama/Llama-2-7b-hf"
     tok = AutoTokenizer.from_pretrained(model_name)
     tok.pad_token = tok.eos_token
     dummy = type("obj", (), {"dtype": "float16"})()

@@ -57,11 +57,11 @@ def kangaroo_forward(inputs, model, tokenizer, max_new_tokens, do_sample=False, 
             token = step.token
             global_tokens[:, start_index] = token.squeeze(-1)
             start_index += 1
-            if token.item() == token_eos or start_index >= max_length:
+            if token.eq(token_eos).all().item() or start_index >= max_length:
                 break
 
         output_ids = global_tokens[0, :start_index].tolist()
-        new_token = start_index - context_length - 1
+        new_token = start_index - context_length
         idx = len(trace) - 1
         return [output_ids], new_token, idx, [int(s.accept.item()) for s in trace], trace
 
