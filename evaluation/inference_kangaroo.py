@@ -307,15 +307,9 @@ if __name__ == "__main__":
     question_file = f"data/question.jsonl"
 
     model = KangarooModel(
-        args.model_path,
-        args.adapter_path,
-        args,
-        EARLY_STOP_LAYER=args.exitlayer,
+        args.model_path, args.adapter_path, args, EARLY_STOP_LAYER=args.exitlayer
     )
-    model.base_model.get_base_model().parallelize()
-    model.adapter_model.to("cuda:0")
-    model.exit_proj.to("cuda:0")
-    model.head_model.to("cuda:0")
+    # the base_model is already sharded; heads/adapter were placed on model.first_device
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     do_sample = False
 

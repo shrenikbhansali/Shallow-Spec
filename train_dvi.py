@@ -69,8 +69,7 @@ def main(args: Optional[argparse.Namespace] = None):
     if args is None:
         args = parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+    # Build model & let it shard itself
     tok = build_tokenizer(args.model_name)
 
     dummy = argparse.Namespace(dtype="bfloat16")
@@ -78,13 +77,12 @@ def main(args: Optional[argparse.Namespace] = None):
         args.model_name, None, dummy, EARLY_STOP_LAYER=args.exit_layer
     )
     model.base_model = inject_dual_lora(model.base_model, args.exit_layer)
-    model.base_model.get_base_model().parallelize()
-    model.adapter_model.to("cuda:0")
-    model.exit_proj.to("cuda:0")
-    model.head_model.to("cuda:0")
     model.eval()
-    dtype = torch.bfloat16 if hasattr(model.base_model, "dtype") else torch.float32
-    dtype = getattr(model.base_model, "dtype", dtype)
+
+    dtype = getattr(model.base_model, "dtype", torch.float32)
+    # All heads & adapter are already on model.first_device
+    first_dev = model.first_device
+    device = torch.device(first_dev)
 
     fast_params, slow_params = split_lora_params(model.base_model)
     if not fast_params or not slow_params:
@@ -114,7 +112,8 @@ def main(args: Optional[argparse.Namespace] = None):
             prompt = _get_prompt(row)
             if not prompt or not prompt.strip():
                 continue
-            enc = tok(prompt, return_tensors="pt").to(device)
+            # send inputs to the same GPU as the first layer
+            enc = tok(prompt, return_tensors="pt").to(model.first_device)
             with torch.no_grad():
                 _, _, _, accept_list, trace = kangaroo_forward(
                     enc,

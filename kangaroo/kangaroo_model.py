@@ -24,13 +24,19 @@ class KangarooModel(nn.Module):
         EARLY_STOP_LAYER=2,
     ):
         super().__init__()
+        # Load & shard the base model across all GPUs
         self.base_model = EarlyExitLlamaForCausalLM.from_pretrained(
             base_model_name_or_path,
             torch_dtype=str_to_torch_dtype(args.dtype),
             device_map="auto",
             EARLY_STOP_LAYER=EARLY_STOP_LAYER,
-        )
-        self.base_model = self.base_model.eval()
+        ).eval()
+
+        # Grab the HF-generated device map and pick the device of the embedding (first) layer
+        # so we can co-locate our heads & adapter there.
+        self.hf_device_map = self.base_model.hf_device_map
+        first_gpu = self.hf_device_map.get("model.embed_tokens", 0)
+        self.first_device = f"cuda:{first_gpu}"
 
         self.exit_layer = EARLY_STOP_LAYER
 
@@ -44,12 +50,14 @@ class KangarooModel(nn.Module):
                 adapter_weights = hf_hub_download(adapter_model_path, "pytorch_model.bin")
 
             self.adapter_model.load_state_dict(torch.load(adapter_weights), strict=False)
-        self.adapter_model = self.adapter_model.eval().to(self.base_model.device)
+        # Move the adapter onto the first-device shard
+        self.adapter_model = self.adapter_model.eval().to(self.first_device)
 
         if args.dtype == "float16":
             self.adapter_model = self.adapter_model.half()
 
-        self.head_model = torch.nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        # heads: place on the same GPU as the first layer
+        self.head_model = torch.nn.Linear(config.hidden_size, config.vocab_size, bias=False).to(self.first_device)
 
         head_path = None
         if os.path.isdir(base_model_name_or_path):
@@ -89,17 +97,17 @@ class KangarooModel(nn.Module):
             weights = torch.load(head_file)
         tensor = weights["lm_head.weight"].float()
         self.head_model.weight.data = tensor
-        self.head_model = self.head_model.eval().to(self.base_model.device)
+        self.head_model = self.head_model.eval()
 
-        self.exit_proj = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.exit_proj = nn.Linear(config.hidden_size, config.vocab_size, bias=False).to(self.first_device)
         self.exit_proj.weight.data = tensor.clone()
-        self.exit_proj = self.exit_proj.eval().to(self.base_model.device)
+        self.exit_proj = self.exit_proj.eval()
 
         if args.dtype == "float16":
             self.head_model = self.head_model.half()
             self.exit_proj = self.exit_proj.half()
 
-        # Bind heads so spec_decode_step always finds them
+        # Bind heads for spec_decode_step
         self.base_model.exit_proj = self.exit_proj
         self.base_model.head_model = self.head_model
 
