@@ -78,7 +78,7 @@ def main(args: Optional[argparse.Namespace] = None):
         args.model_name, None, dummy, EARLY_STOP_LAYER=args.exit_layer
     )
     model.base_model = inject_dual_lora(model.base_model, args.exit_layer)
-    model.base_model.parallelize()
+    model.base_model.get_base_model().parallelize()
     model.adapter_model.to("cuda:0")
     model.exit_proj.to("cuda:0")
     model.head_model.to("cuda:0")

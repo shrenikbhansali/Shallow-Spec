@@ -312,7 +312,7 @@ if __name__ == "__main__":
         args,
         EARLY_STOP_LAYER=args.exitlayer,
     )
-    model.base_model.parallelize()
+    model.base_model.get_base_model().parallelize()
     model.adapter_model.to("cuda:0")
     model.exit_proj.to("cuda:0")
     model.head_model.to("cuda:0")
