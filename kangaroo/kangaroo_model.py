@@ -32,11 +32,23 @@ class KangarooModel(nn.Module):
             EARLY_STOP_LAYER=EARLY_STOP_LAYER,
         ).eval()
 
-        # Grab the HF-generated device map and pick the device of the embedding (first) layer
-        # so we can co-locate our heads & adapter there.
-        self.hf_device_map = self.base_model.hf_device_map
-        first_gpu = self.hf_device_map.get("model.embed_tokens", 0)
-        self.first_device = f"cuda:{first_gpu}"
+        # ------------------------------------------------------------------ #
+        #  Work-shard discovery                                             #
+        # ------------------------------------------------------------------ #
+        # `hf_device_map` tells us where every sub-module lives after
+        # `device_map="auto"`.  We want:
+        #   • adapter   + exit_proj  -> GPU of early-exit layer  (layer k)
+        #   • head_model             -> GPU of last layer       (layer L-1)
+        self.hf_device_map = self.base_model.hf_device_map  # e.g. {"model.embed_tokens": 0, "model.layers.0":0, ...}
+
+        # Device that holds the early-exit layer
+        early_gpu_id = self.hf_device_map.get(f"model.layers.{EARLY_STOP_LAYER}", 0)
+        self.early_device  = f"cuda:{early_gpu_id}"
+
+        # Device that holds the final transformer block
+        num_layers = self.base_model.config.num_hidden_layers
+        last_gpu_id = self.hf_device_map.get(f"model.layers.{num_layers-1}", early_gpu_id)
+        self.final_device = f"cuda:{last_gpu_id}"
 
         self.exit_layer = EARLY_STOP_LAYER
 
@@ -50,14 +62,16 @@ class KangarooModel(nn.Module):
                 adapter_weights = hf_hub_download(adapter_model_path, "pytorch_model.bin")
 
             self.adapter_model.load_state_dict(torch.load(adapter_weights), strict=False)
-        # Move the adapter onto the first-device shard
-        self.adapter_model = self.adapter_model.eval().to(self.first_device)
+        # Place adapter on *early-exit* shard
+        self.adapter_model = self.adapter_model.eval().to(self.early_device)
 
         if args.dtype == "float16":
             self.adapter_model = self.adapter_model.half()
 
-        # heads: place on the same GPU as the first layer
-        self.head_model = torch.nn.Linear(config.hidden_size, config.vocab_size, bias=False).to(self.first_device)
+        # heads:
+        #   • head_model   (verifier) -> final_device
+        #   • exit_proj    (draft)    -> early_device
+        self.head_model  = nn.Linear(config.hidden_size, config.vocab_size, bias=False).to(self.final_device)
 
         head_path = None
         if os.path.isdir(base_model_name_or_path):
@@ -99,7 +113,7 @@ class KangarooModel(nn.Module):
         self.head_model.weight.data = tensor
         self.head_model = self.head_model.eval()
 
-        self.exit_proj = nn.Linear(config.hidden_size, config.vocab_size, bias=False).to(self.first_device)
+        self.exit_proj = nn.Linear(config.hidden_size, config.vocab_size, bias=False).to(self.early_device)
         self.exit_proj.weight.data = tensor.clone()
         self.exit_proj = self.exit_proj.eval()
 
