@@ -35,13 +35,20 @@ def _make_causal_mask(
     input_ids_shape: torch.Size, dtype: torch.dtype, device: torch.device, past_key_values_length: int = 0
 ):
     bsz, tgt_len = input_ids_shape
-    mask = torch.full((tgt_len, tgt_len), torch.finfo(dtype).min, device=device)
+    mask = torch.full(
+        (tgt_len, tgt_len),
+        torch.finfo(dtype).min,
+        device=device,
+        dtype=dtype,
+    )
     mask_cond = torch.arange(mask.size(-1), device=device)
     mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
     mask = mask.to(dtype)
     if past_key_values_length > 0:
         mask = torch.cat([torch.zeros(tgt_len, past_key_values_length, dtype=dtype, device=device), mask], dim=-1)
-    return mask[None, None, :, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
+    return mask.unsqueeze(0).unsqueeze(0).expand(
+        bsz, 1, tgt_len, tgt_len + past_key_values_length
+    )
 
 # Copied from transformers.models.bart.modeling_bart._expand_mask
 def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None):
@@ -153,7 +160,7 @@ class LlamaAttention(nn.Module):
             value_states = torch.cat([past_key_value[1], value_states], dim=2)
 
         # ---------- PATCH ①: bound KV cache length ----------
-        MAX_ADAPTER_CONTEXT = 256
+        MAX_ADAPTER_CONTEXT = 64
         if key_states.shape[2] > MAX_ADAPTER_CONTEXT:
             key_states = key_states[:, :, -MAX_ADAPTER_CONTEXT:, :].contiguous()
             value_states = value_states[:, :, -MAX_ADAPTER_CONTEXT:, :].contiguous()
@@ -252,25 +259,26 @@ class AdapterModel(nn.Module):
         self.layers = nn.ModuleList([LlamaDecoderLayer(config)])
         # -------------------------------------------------------
 
-    def _prepare_decoder_attention_mask(self, attention_mask, input_shape, inputs_embeds, past_key_values_length):
-        combined_attention_mask = None
-        MAX_ADAPTER_CONTEXT = 256
-        # Only mask the last window we actually keep in KV‑cache
-        effective_past = min(past_key_values_length, MAX_ADAPTER_CONTEXT)
-        if input_shape[-1] > 1:
-            combined_attention_mask = _make_causal_mask(
-                input_shape,
-                torch.float32,                          # keep fp32 for -inf
-                device=inputs_embeds.device,
-                past_key_values_length=effective_past,
-            )
-            if past_key_values_length > MAX_ADAPTER_CONTEXT:
-                # also crop the pad mask so shapes line up
-                attention_mask = attention_mask[:, -MAX_ADAPTER_CONTEXT:]
+    def _prepare_decoder_attention_mask(
+        self, attention_mask, input_shape, inputs_embeds, past_key_values_length
+    ):
+        # Build a *1-token* causal mask, **and** slice pad-mask to 1 so shapes match
+        combined_attention_mask = _make_causal_mask(
+            (input_shape[0], 1),
+            inputs_embeds.dtype,
+            device=inputs_embeds.device,
+            past_key_values_length=past_key_values_length,
+        )
+        if attention_mask is not None and attention_mask.shape[1] > 1:
+            attention_mask = attention_mask[:, -1:]
 
         if attention_mask is not None:
-            expanded = _expand_mask(attention_mask, torch.float32, tgt_len=input_shape[-1]).to(inputs_embeds.device)
-            combined_attention_mask = expanded if combined_attention_mask is None else expanded + combined_attention_mask
+            expanded = _expand_mask(
+                attention_mask, inputs_embeds.dtype, tgt_len=1
+            ).to(inputs_embeds.device)
+            combined_attention_mask = (
+                expanded if combined_attention_mask is None else expanded + combined_attention_mask
+            )
         return combined_attention_mask
 
     def forward(
@@ -306,7 +314,7 @@ class AdapterModel(nn.Module):
         return_dict: Optional[bool] = None,
         std=None
     ):
-        MAX_ADAPTER_CONTEXT = 256
+        MAX_ADAPTER_CONTEXT = 64
 
         batch_size, seq_length, _ = inputs_embeds.shape
         raw_past = past_key_values[0][0].shape[2] if past_key_values is not None else 0

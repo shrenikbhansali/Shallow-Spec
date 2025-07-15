@@ -17,9 +17,11 @@ sys.modules.setdefault("evaluation.eval", dummy_mod)
 from kangaroo.kangaroo_model import KangarooModel
 from evaluation.inference_kangaroo import kangaroo_forward
 from transformers import AutoTokenizer, AutoModelForCausalLM, LlamaConfig
+import pytest
 import tempfile
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_hidden_hook():
     tok = AutoTokenizer.from_pretrained("hf-internal-testing/llama-tokenizer")
     tok.pad_token = tok.eos_token
