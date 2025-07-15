@@ -122,17 +122,21 @@ class EarlyExitLlamaForCausalLM(LlamaForCausalLM):
 
         draft     = in_tokens_small is not None
         base      = in_tokens_small if draft else in_features_large
-        bsz, T    = base.shape[:2]
+        bsz, step_len = base.shape[:2]
         nh        = self.config.num_attention_heads
         hd        = self.config.hidden_size // nh
         self._init_cache(bsz, len(self.model.layers), nh, hd, base.device)
 
         focus     = 0 if draft else self.early_exit_layer
         past_len  = self.past_key_values[focus].shape[2]
-        total_len = past_len + T
+        total_len = past_len + step_len
 
         if position_ids is None:
-            position_ids = torch.arange(past_len, total_len, device=base.device).unsqueeze(0).expand(bsz, T)
+            position_ids = (
+                torch.arange(past_len, total_len, device=base.device)
+                .unsqueeze(0)
+                .expand(bsz, step_len)
+            )
 
         if draft:
             inp_emb = self.model.embed_tokens(in_tokens_small)
@@ -141,8 +145,11 @@ class EarlyExitLlamaForCausalLM(LlamaForCausalLM):
             inp_emb = None
             pos_emb = self.model.rotary_emb(in_features_large, position_ids)
 
-        attn_mask = _causal_mask(torch.ones((bsz, total_len), dtype=torch.bool, device=base.device),
-                                 T, past_len)
+        attn_mask = _causal_mask(
+            torch.ones((bsz, total_len), dtype=torch.bool, device=base.device),
+            step_len,                       # <- was undefined “T”
+            past_len,
+        )
 
         if draft:
             layers, start, hidden_in = self.model.layers[:self.early_exit_layer], 0, inp_emb
@@ -164,12 +171,11 @@ class EarlyExitLlamaForCausalLM(LlamaForCausalLM):
         )
 
         # match device *and* dtype of exit_proj.weight
-        w = self.exit_proj.weight
-        if exit_h.device != w.device or exit_h.dtype != w.dtype:
-            exit_h_for_proj = exit_h.to(device=w.device, dtype=w.dtype, non_blocking=True)
-        else:
-            exit_h_for_proj = exit_h
-        draft_logits = self.exit_proj(exit_h_for_proj).float()
+        dev = self.exit_proj.weight.device
+        dtype = self.exit_proj.weight.dtype
+        draft_logits = self.exit_proj(
+            exit_h.to(device=dev, dtype=dtype, non_blocking=True)
+        ).float()
 
         # sample / greedy
         draft_tok = (
