@@ -80,9 +80,8 @@ def main(args: Optional[argparse.Namespace] = None):
     model.eval()
 
     dtype = getattr(model.base_model, "dtype", torch.float32)
-    # All heads & adapter are already on model.first_device
-    first_dev = model.first_device
-    device = torch.device(first_dev)
+    # All heads & adapter are on the *early‑exit* shard
+    device = torch.device(model.early_device)
 
     fast_params, slow_params = split_lora_params(model.base_model)
     if not fast_params or not slow_params:
@@ -112,8 +111,8 @@ def main(args: Optional[argparse.Namespace] = None):
             prompt = _get_prompt(row)
             if not prompt or not prompt.strip():
                 continue
-            # send inputs to the same GPU as the first layer
-            enc = tok(prompt, return_tensors="pt").to(model.first_device)
+            # send inputs to the early‑exit GPU
+            enc = tok(prompt, return_tensors="pt").to(model.early_device)
             with torch.no_grad():
                 _, _, _, accept_list, trace = kangaroo_forward(
                     enc,

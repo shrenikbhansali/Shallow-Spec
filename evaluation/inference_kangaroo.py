@@ -309,7 +309,7 @@ if __name__ == "__main__":
     model = KangarooModel(
         args.model_path, args.adapter_path, args, EARLY_STOP_LAYER=args.exitlayer
     )
-    # the base_model is already sharded; heads/adapter were placed on model.first_device
+    # base_model is sharded; heads/adapter live on model.early_device
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     do_sample = False
 
