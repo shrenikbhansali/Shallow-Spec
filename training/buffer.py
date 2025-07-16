@@ -56,10 +56,11 @@ class ReplayBuffer:
         token: int,
         reward: float,
         conf: float,
-    ) -> None:
+    ) -> bool:
         if self._hidden_buf is None:
             self._allocate(hidden.detach())
         assert self._hidden_buf is not None
+        dropped = self._size == self.capacity
         idx = self._next_idx
         self._hidden_buf[idx] = hidden.detach().to(self.device)
         self._token_buf[idx] = int(token)
@@ -69,6 +70,7 @@ class ReplayBuffer:
         self._next_idx = (self._next_idx + 1) % self.capacity
         if self._size < self.capacity:
             self._size += 1
+        return dropped
 
     def accepted_count(self) -> int:
         if self._size == 0:

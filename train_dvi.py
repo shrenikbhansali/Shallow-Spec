@@ -32,6 +32,17 @@ def parse_args():
     parser.add_argument("--baseline_momentum", type=float, default=0.95)
     parser.add_argument("--beta_kl", type=float, default=0.1)
     parser.add_argument(
+        "--log_every",
+        type=int,
+        default=10,
+        help="prompt interval for high-level metrics",
+    )
+    parser.add_argument(
+        "--debug_dump",
+        action="store_true",
+        help="dump per-token details into logs/debug_tokens_DATE.jsonl",
+    )
+    parser.add_argument(
         "--stream_dataset",
         type=str,
         default="RyokoAI/ShareGPT52K",
@@ -119,6 +130,9 @@ def main(args: Optional[argparse.Namespace] = None):
     verifier_buffer = ReplayBuffer(capacity=args.fast_batch * 4, device=device)
     baseline = 0.0
     step_fast = 0
+    # running counters
+    tot_tokens_seen = tot_tokens_accepted = 0
+    buf_drops = 0
 
     ds = load_dataset(args.stream_dataset, split="train", streaming=True)
 
@@ -126,7 +140,9 @@ def main(args: Optional[argparse.Namespace] = None):
     log_dir.mkdir(exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     log_path = log_dir / f"dvi_train_{timestamp}.jsonl"
+    dbg_path = log_dir / f"debug_tokens_{timestamp}.jsonl" if args.debug_dump else None
     with open(log_path, "w") as log_f:
+        dbg_f = open(dbg_path, "w") if dbg_path else None
         log_f.write(json.dumps({"config": vars(args)}) + "\n")
 
         for idx, row in enumerate(ds):
@@ -136,6 +152,7 @@ def main(args: Optional[argparse.Namespace] = None):
                 continue
             # send inputs to the early‑exit GPU
             enc = tok(prompt, return_tensors="pt").to(model.early_device)
+            t_spec0 = time.time()
             with torch.no_grad():
                 _, _, _, accept_list, trace = kangaroo_forward(
                     enc,
@@ -146,19 +163,22 @@ def main(args: Optional[argparse.Namespace] = None):
                     EARLY_STOP_LAYER=args.exit_layer,
                     return_trace=True,
                 )
+            spec_time_ms = (time.time() - t_spec0) * 1000
 
             confs = []
-            for step in trace:
-                reward = float(step.accept.item())
+            for tok_pos, step in enumerate(trace):
+                reward = int(step.accept.item())
                 conf = torch.softmax(step.logits[0, -1], -1)[step.token.item()].item()
                 confs.append(conf)
                 # append to both buffers
-                rl_buffer.append(
+                dropped = rl_buffer.append(
                     hidden=step.hidden[0, -1].to(device, dtype),
                     token=int(step.token.item()),
                     reward=reward,
                     conf=conf,
                 )
+                if dropped:
+                    buf_drops += 1
                 verifier_buffer.append(
                     hidden=step.hidden[0, -1].to(device, dtype),
                     token=int(step.token.item()),
@@ -171,8 +191,24 @@ def main(args: Optional[argparse.Namespace] = None):
                         args.baseline_momentum * baseline
                         + (1 - args.baseline_momentum) * reward
                     )
+                tot_tokens_seen += 1
+                tot_tokens_accepted += reward
 
-            spec_time_ms = (time.time() - t0) * 1000
+                if dbg_f:
+                    dbg_f.write(
+                        json.dumps(
+                            {
+                                "prompt_idx": idx,
+                                "tok_pos": tok_pos,
+                                "token_id": int(step.token.item()),
+                                "token_str": tok.decode(int(step.token.item())),
+                                "conf": conf,
+                                "accept": reward,
+                            }
+                        )
+                        + "\n"
+                    )
+
             draft_len = len(trace)
             accepted_len = sum(int(s.accept.item()) for s in trace)
             avg_conf = sum(confs) / len(confs) if confs else 0.0
@@ -187,7 +223,7 @@ def main(args: Optional[argparse.Namespace] = None):
                 enable_lora_grads(model.base_model, "lora_S", True)
                 enable_lora_grads(model.base_model, "lora_D", False)
                 fast_opt.zero_grad(set_to_none=True)
-                t_fast = time.time()
+                t_fast0 = time.time()
 
                 h = fast_batch["hidden"].to(device, dtype)
                 tok_b = fast_batch["token"].to(device)
@@ -204,7 +240,7 @@ def main(args: Optional[argparse.Namespace] = None):
                 loss_fast.backward()
                 fast_grad_norm = float(torch.nn.utils.clip_grad_norm_(fast_params, 1.0).item())
                 fast_opt.step()
-                fast_step_time_ms = (time.time() - t_fast) * 1000
+                fast_time_ms = (time.time() - t_fast0) * 1000
 
                 # re-freeze for safety
                 enable_lora_grads(model.base_model, "lora_S", False)
@@ -250,28 +286,34 @@ def main(args: Optional[argparse.Namespace] = None):
                     enable_lora_grads(model.base_model, "lora_S", False)
                     enable_lora_grads(model.base_model, "lora_D", False)
 
-            if (idx + 1) % 10 == 0:
-                accept_rate = float(sum(accept_list)) / max(len(accept_list), 1)
+            if (idx + 1) % args.log_every == 0:
+                accept_rate = tot_tokens_accepted / max(tot_tokens_seen, 1)
                 log_dict = {
                     "idx": idx + 1,
-                    "step": step_fast,
+                    "step_fast": step_fast,
+                    "tokens_seen": tot_tokens_seen,
+                    "tokens_accepted": tot_tokens_accepted,
+                    "baseline": baseline,
+                    "accept_rate": accept_rate,
                     "spec_time_ms": spec_time_ms,
                     "draft_len": draft_len,
                     "accepted_len": accepted_len,
                     "avg_conf": avg_conf,
                     "min_conf": min_conf,
                     "max_conf": max_conf,
-                    "rl_size": rl_size,
-                    "rl_accepts": rl_accepts,
-                    "baseline": baseline,
-                    "accept_rate": accept_rate,
+                    "rl_buffer": {
+                        "size": len(rl_buffer),
+                        "accepted": rl_buffer.accepted_count(),
+                        "capacity": rl_buffer.capacity,
+                        "drops": buf_drops,
+                    },
                 }
                 if "loss_fast" in locals():
                     log_dict["loss_fast"] = float(loss_fast.item())
                 if "fast_grad_norm" in locals():
                     log_dict["fast_grad_norm"] = fast_grad_norm
-                if "fast_step_time_ms" in locals():
-                    log_dict["fast_step_time_ms"] = fast_step_time_ms
+                if "fast_time_ms" in locals():
+                    log_dict["fast_time_ms"] = fast_time_ms
                 if "loss_ce" in locals():
                     log_dict["loss_ce"] = float(loss_ce.item())
                 if "loss_kl" in locals():
@@ -289,6 +331,9 @@ def main(args: Optional[argparse.Namespace] = None):
     ckpt_dir = Path("checkpoints/dvi_lora")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     model.base_model.save_pretrained(str(ckpt_dir))
+
+    if dbg_f:
+        dbg_f.close()
 
 
 if __name__ == "__main__":
