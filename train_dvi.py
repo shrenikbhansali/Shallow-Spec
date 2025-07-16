@@ -130,6 +130,7 @@ def main(args: Optional[argparse.Namespace] = None):
         log_f.write(json.dumps({"config": vars(args)}) + "\n")
 
         for idx, row in enumerate(ds):
+            t0 = time.time()
             prompt = _get_prompt(row)
             if not prompt or not prompt.strip():
                 continue
@@ -146,9 +147,11 @@ def main(args: Optional[argparse.Namespace] = None):
                     return_trace=True,
                 )
 
+            confs = []
             for step in trace:
                 reward = float(step.accept.item())
                 conf = torch.softmax(step.logits[0, -1], -1)[step.token.item()].item()
+                confs.append(conf)
                 # append to both buffers
                 rl_buffer.append(
                     hidden=step.hidden[0, -1].to(device, dtype),
@@ -169,12 +172,22 @@ def main(args: Optional[argparse.Namespace] = None):
                         + (1 - args.baseline_momentum) * reward
                     )
 
+            spec_time_ms = (time.time() - t0) * 1000
+            draft_len = len(trace)
+            accepted_len = sum(int(s.accept.item()) for s in trace)
+            avg_conf = sum(confs) / len(confs) if confs else 0.0
+            min_conf = min(confs) if confs else 0.0
+            max_conf = max(confs) if confs else 0.0
+            rl_size = len(rl_buffer)
+            rl_accepts = rl_buffer.accepted_count()
+
             if rl_buffer.accepted_count() >= args.fast_batch:
                 ## FAST (REINFORCE) update on *accepted* only
                 fast_batch = rl_buffer.sample(args.fast_batch, accepted_only=True)
                 enable_lora_grads(model.base_model, "lora_S", True)
                 enable_lora_grads(model.base_model, "lora_D", False)
                 fast_opt.zero_grad(set_to_none=True)
+                t_fast = time.time()
 
                 h = fast_batch["hidden"].to(device, dtype)
                 tok_b = fast_batch["token"].to(device)
@@ -189,8 +202,9 @@ def main(args: Optional[argparse.Namespace] = None):
                 adv = (r - baseline).detach()
                 loss_fast = -(adv * log_pi).mean()
                 loss_fast.backward()
-                torch.nn.utils.clip_grad_norm_(fast_params, 1.0)
+                fast_grad_norm = float(torch.nn.utils.clip_grad_norm_(fast_params, 1.0).item())
                 fast_opt.step()
+                fast_step_time_ms = (time.time() - t_fast) * 1000
 
                 # re-freeze for safety
                 enable_lora_grads(model.base_model, "lora_S", False)
@@ -209,6 +223,7 @@ def main(args: Optional[argparse.Namespace] = None):
                     enable_lora_grads(model.base_model, "lora_S", False)
                     enable_lora_grads(model.base_model, "lora_D", True)
                     slow_opt.zero_grad(set_to_none=True)
+                    t_slow = time.time()
 
                     h_all = slow_batch["hidden"].to(device, dtype)
                     tok_all = slow_batch["token"].to(device)
@@ -226,27 +241,45 @@ def main(args: Optional[argparse.Namespace] = None):
                     )
                     loss_slow = loss_ce + args.beta_kl * loss_kl
                     loss_slow.backward()
-                    torch.nn.utils.clip_grad_norm_(slow_params, 1.0)
+                    slow_grad_norm = float(torch.nn.utils.clip_grad_norm_(slow_params, 1.0).item())
                     slow_opt.step()
+                    slow_step_time_ms = (time.time() - t_slow) * 1000
                     # clear verifier buffer after training
                     verifier_buffer.clear(accepted_only=False)
                     # re-freeze everything
                     enable_lora_grads(model.base_model, "lora_S", False)
                     enable_lora_grads(model.base_model, "lora_D", False)
 
-            if (idx + 1) % 100 == 0:
+            if (idx + 1) % 10 == 0:
                 accept_rate = float(sum(accept_list)) / max(len(accept_list), 1)
                 log_dict = {
                     "idx": idx + 1,
                     "step": step_fast,
+                    "spec_time_ms": spec_time_ms,
+                    "draft_len": draft_len,
+                    "accepted_len": accepted_len,
+                    "avg_conf": avg_conf,
+                    "min_conf": min_conf,
+                    "max_conf": max_conf,
+                    "rl_size": rl_size,
+                    "rl_accepts": rl_accepts,
                     "baseline": baseline,
                     "accept_rate": accept_rate,
-                    "time": time.time(),
                 }
                 if "loss_fast" in locals():
                     log_dict["loss_fast"] = float(loss_fast.item())
-                if "loss_slow" in locals():
-                    log_dict["loss_slow"] = float(loss_slow.item())
+                if "fast_grad_norm" in locals():
+                    log_dict["fast_grad_norm"] = fast_grad_norm
+                if "fast_step_time_ms" in locals():
+                    log_dict["fast_step_time_ms"] = fast_step_time_ms
+                if "loss_ce" in locals():
+                    log_dict["loss_ce"] = float(loss_ce.item())
+                if "loss_kl" in locals():
+                    log_dict["loss_kl"] = float(loss_kl.item())
+                if "slow_grad_norm" in locals():
+                    log_dict["slow_grad_norm"] = slow_grad_norm
+                if "slow_step_time_ms" in locals():
+                    log_dict["slow_step_time_ms"] = slow_step_time_ms
                 log_f.write(json.dumps(log_dict) + "\n")
                 log_f.flush()
 
