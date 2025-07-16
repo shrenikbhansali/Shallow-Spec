@@ -77,6 +77,28 @@ def main(args: Optional[argparse.Namespace] = None):
         args.model_name, None, dummy, EARLY_STOP_LAYER=args.exit_layer
     )
     model.base_model = inject_dual_lora(model.base_model, args.exit_layer)
+    MAX_SEQ_LEN = 20544      # 8 k prompt + 64 gen, leave headroom
+
+    def prime_rope_cache(model, max_seq_len: int):
+        """
+        1.  For custom adapter layers (they still expose `_set_cos_sin_cache`)
+            – allocate the big cos/sin tables immediately.
+        2.  For HF core layers – just bump `max_seq_len_cached`
+            so the first forward pass won’t trigger a grow‑and‑copy.
+        """
+        for mod in model.modules():
+            # ① Your adapter implementation
+            if hasattr(mod, "_set_cos_sin_cache"):
+                mod._set_cos_sin_cache(
+                    seq_len=max_seq_len,
+                    device=next(mod.parameters()).device,
+                    dtype=next(mod.parameters()).dtype,
+                )
+            # ② Official HF implementation
+            elif hasattr(mod, "max_seq_len_cached"):
+                mod.max_seq_len_cached = max_seq_len
+
+    prime_rope_cache(model.base_model, MAX_SEQ_LEN)
     model.eval()
 
     dtype = getattr(model.base_model, "dtype", torch.float32)

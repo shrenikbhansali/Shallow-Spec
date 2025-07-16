@@ -73,6 +73,10 @@ def rotate_half(x):
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
     cos = cos.squeeze(1).squeeze(0)
     sin = sin.squeeze(1).squeeze(0)
+    max_pos = position_ids.max().item()
+    if max_pos >= cos.size(0):
+        print(f"RoPE cache too small: max pid {max_pos}, cos rows {cos.size(0)}")
+
     cos = cos[position_ids].unsqueeze(1)
     sin = sin[position_ids].unsqueeze(1)
     q_embed = (q * cos) + (rotate_half(q) * sin)
@@ -87,6 +91,7 @@ class LlamaRotaryEmbedding(torch.nn.Module):
         self.base = base
         inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.max_seq_len_cached = max_position_embeddings
         self._set_cos_sin_cache(seq_len=max_position_embeddings, device=self.inv_freq.device, dtype=torch.get_default_dtype())
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
@@ -139,47 +144,49 @@ class LlamaAttention(nn.Module):
 
         # project to QKV
         query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
+        key_states   = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
         # shape into heads
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        key_states   = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        # rotary embeddings
-        kv_seq_len = key_states.shape[-2]
+        # ── combine with past KV if provided ─────────────────────────────────
         if past_key_value is not None:
-            kv_seq_len += past_key_value[0].shape[-2]
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-
-        # reuse past KV if provided
-        if past_key_value is not None:
-            key_states = torch.cat([past_key_value[0], key_states], dim=2)
+            key_states   = torch.cat([past_key_value[0], key_states], dim=2)
             value_states = torch.cat([past_key_value[1], value_states], dim=2)
 
-        # ---------- PATCH ①: bound KV cache length ----------
+        # ── bound KV cache length to a local window ─────────────────────────
         MAX_ADAPTER_CONTEXT = 64
         if key_states.shape[2] > MAX_ADAPTER_CONTEXT:
-            key_states = key_states[:, :, -MAX_ADAPTER_CONTEXT:, :].contiguous()
+            key_states   = key_states[:, :, -MAX_ADAPTER_CONTEXT:, :].contiguous()
             value_states = value_states[:, :, -MAX_ADAPTER_CONTEXT:, :].contiguous()
             if attention_mask is not None:
                 attention_mask = attention_mask[:, :, :, -MAX_ADAPTER_CONTEXT:].contiguous()
-        kv_seq_len = key_states.shape[-2]
-        # ------------------------------------------------------
 
+        kv_seq_len = key_states.size(-2)
+
+        # ── apply rotary with a zero‑based, local position index ────────────
+        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        local_position_ids = torch.arange(kv_seq_len, device=hidden_states.device, dtype=torch.long)
+        local_position_ids = local_position_ids.unsqueeze(0).expand(bsz, kv_seq_len)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin, local_position_ids
+        )
+
+        # ── prepare new cache ────────────────────────────────────────────────
         past_key_value = (key_states, value_states) if use_cache else None
 
         # repeat k/v heads to full size
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        key_states   = repeat_kv(key_states,   self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         # attention
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_output = torch.matmul(attn_weights, value_states)
 
         # reshape back
@@ -255,14 +262,12 @@ class AdapterModel(nn.Module):
         self.vocab_size = config.vocab_size
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # ---------- PATCH ②: shrink to single layer ----------
+        # shrink to a single layer
         self.layers = nn.ModuleList([LlamaDecoderLayer(config)])
-        # -------------------------------------------------------
 
     def _prepare_decoder_attention_mask(
         self, attention_mask, input_shape, inputs_embeds, past_key_values_length
     ):
-        # Build a *1-token* causal mask, **and** slice pad-mask to 1 so shapes match
         combined_attention_mask = _make_causal_mask(
             (input_shape[0], 1),
             inputs_embeds.dtype,
@@ -276,9 +281,7 @@ class AdapterModel(nn.Module):
             expanded = _expand_mask(
                 attention_mask, inputs_embeds.dtype, tgt_len=1
             ).to(inputs_embeds.device)
-            combined_attention_mask = (
-                expanded if combined_attention_mask is None else expanded + combined_attention_mask
-            )
+            combined_attention_mask = expanded + combined_attention_mask
         return combined_attention_mask
 
     def forward(
@@ -317,8 +320,14 @@ class AdapterModel(nn.Module):
         MAX_ADAPTER_CONTEXT = 64
 
         batch_size, seq_length, _ = inputs_embeds.shape
+        if seq_length > MAX_ADAPTER_CONTEXT:
+            slice_start = seq_length - MAX_ADAPTER_CONTEXT
+            inputs_embeds = inputs_embeds[:, slice_start:, :]
+            if position_ids is not None:
+                position_ids = position_ids[:, slice_start:]
+            seq_length = inputs_embeds.size(1)
+
         raw_past = past_key_values[0][0].shape[2] if past_key_values is not None else 0
-        # Limit *effective* past tokens to the same window we keep in KV cache
         past_length = min(raw_past, MAX_ADAPTER_CONTEXT)
         position_ids = (
             position_ids.view(-1, seq_length).long()
@@ -327,18 +336,17 @@ class AdapterModel(nn.Module):
                  .unsqueeze(0)
                  .view(-1, seq_length)
         )
-        # Build / crop attention_mask so its length == past_length  +  seq_length
+
         if attention_mask is None:
             attention_mask = torch.ones((batch_size, raw_past + seq_length),
                                         device=inputs_embeds.device, dtype=torch.bool)
-        # keep only the tail that the KV cache actually covers
         if raw_past > past_length:
             attention_mask = attention_mask[:, -(past_length + seq_length):]
         attention_mask = self._prepare_decoder_attention_mask(
             attention_mask,
-            (batch_size, seq_length),          # tgt dimension
+            (batch_size, seq_length),
             inputs_embeds,
-            past_length                        # effective past
+            past_length
         )
 
         hidden_states = inputs_embeds
