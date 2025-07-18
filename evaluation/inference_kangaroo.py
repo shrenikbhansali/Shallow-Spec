@@ -106,6 +106,7 @@ def kangaroo_forward(
 
             start_index_copy = start_index
             end_index = start_index + 1
+            predict_score = 1.0
 
             # STEP 1: Small model decoding
             for step in range(1 + SPECULATIVE_DECODING_STEPS):
@@ -141,9 +142,9 @@ def kangaroo_forward(
                     )
 
                 # early exiting
-                if step == SPECULATIVE_DECODING_STEPS or (
-                    step > 0 and predict_score < threshold
-                ):
+                if step > 0 and predict_score < threshold:
+                    break
+                if step == SPECULATIVE_DECODING_STEPS:
                     break
 
                 hidden_state, adapter_past_key_values = model.adapter_model.forward_early_stop(
@@ -278,7 +279,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.4,
+        default=0.6,
         help="The temperature for medusa sampling.",
     )
     parser.add_argument(
@@ -307,11 +308,9 @@ if __name__ == "__main__":
     question_file = f"data/question.jsonl"
 
     model = KangarooModel(
-        args.model_path,
-        args.adapter_path,
-        args,
-        EARLY_STOP_LAYER=args.exitlayer,
+        args.model_path, args.adapter_path, args, EARLY_STOP_LAYER=args.exitlayer
     )
+    # base_model is sharded; heads/adapter live on model.early_device
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     do_sample = False
 

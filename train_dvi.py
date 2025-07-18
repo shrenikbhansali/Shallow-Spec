@@ -32,6 +32,17 @@ def parse_args():
     parser.add_argument("--baseline_momentum", type=float, default=0.95)
     parser.add_argument("--beta_kl", type=float, default=0.1)
     parser.add_argument(
+        "--log_every",
+        type=int,
+        default=10,
+        help="prompt interval for high-level metrics",
+    )
+    parser.add_argument(
+        "--debug_dump",
+        action="store_true",
+        help="dump per-token details into logs/debug_tokens_DATE.jsonl",
+    )
+    parser.add_argument(
         "--stream_dataset",
         type=str,
         default="RyokoAI/ShareGPT52K",
@@ -69,8 +80,7 @@ def main(args: Optional[argparse.Namespace] = None):
     if args is None:
         args = parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+    # Build model & let it shard itself
     tok = build_tokenizer(args.model_name)
 
     dummy = argparse.Namespace(dtype="bfloat16")
@@ -78,10 +88,33 @@ def main(args: Optional[argparse.Namespace] = None):
         args.model_name, None, dummy, EARLY_STOP_LAYER=args.exit_layer
     )
     model.base_model = inject_dual_lora(model.base_model, args.exit_layer)
-    model.to(device)
+    MAX_SEQ_LEN = 20544      # 8 k prompt + 64 gen, leave headroom
+
+    def prime_rope_cache(model, max_seq_len: int):
+        """
+        1.  For custom adapter layers (they still expose `_set_cos_sin_cache`)
+            – allocate the big cos/sin tables immediately.
+        2.  For HF core layers – just bump `max_seq_len_cached`
+            so the first forward pass won’t trigger a grow‑and‑copy.
+        """
+        for mod in model.modules():
+            # ① Your adapter implementation
+            if hasattr(mod, "_set_cos_sin_cache"):
+                mod._set_cos_sin_cache(
+                    seq_len=max_seq_len,
+                    device=next(mod.parameters()).device,
+                    dtype=next(mod.parameters()).dtype,
+                )
+            # ② Official HF implementation
+            elif hasattr(mod, "max_seq_len_cached"):
+                mod.max_seq_len_cached = max_seq_len
+
+    prime_rope_cache(model.base_model, MAX_SEQ_LEN)
     model.eval()
-    dtype = torch.bfloat16 if hasattr(model.base_model, "dtype") else torch.float32
-    dtype = getattr(model.base_model, "dtype", dtype)
+
+    dtype = getattr(model.base_model, "dtype", torch.float32)
+    # All heads & adapter are on the *early‑exit* shard
+    device = torch.device(model.early_device)
 
     fast_params, slow_params = split_lora_params(model.base_model)
     if not fast_params or not slow_params:
@@ -97,6 +130,9 @@ def main(args: Optional[argparse.Namespace] = None):
     verifier_buffer = ReplayBuffer(capacity=args.fast_batch * 4, device=device)
     baseline = 0.0
     step_fast = 0
+    # running counters
+    tot_tokens_seen = tot_tokens_accepted = 0
+    buf_drops = 0
 
     ds = load_dataset(args.stream_dataset, split="train", streaming=True)
 
@@ -104,14 +140,19 @@ def main(args: Optional[argparse.Namespace] = None):
     log_dir.mkdir(exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     log_path = log_dir / f"dvi_train_{timestamp}.jsonl"
+    dbg_path = log_dir / f"debug_tokens_{timestamp}.jsonl" if args.debug_dump else None
     with open(log_path, "w") as log_f:
+        dbg_f = open(dbg_path, "w") if dbg_path else None
         log_f.write(json.dumps({"config": vars(args)}) + "\n")
 
         for idx, row in enumerate(ds):
+            t0 = time.time()
             prompt = _get_prompt(row)
             if not prompt or not prompt.strip():
                 continue
-            enc = tok(prompt, return_tensors="pt").to(device)
+            # send inputs to the early‑exit GPU
+            enc = tok(prompt, return_tensors="pt").to(model.early_device)
+            t_spec0 = time.time()
             with torch.no_grad():
                 _, _, _, accept_list, trace = kangaroo_forward(
                     enc,
@@ -122,17 +163,22 @@ def main(args: Optional[argparse.Namespace] = None):
                     EARLY_STOP_LAYER=args.exit_layer,
                     return_trace=True,
                 )
+            spec_time_ms = (time.time() - t_spec0) * 1000
 
-            for step in trace:
-                reward = float(step.accept.item())
+            confs = []
+            for tok_pos, step in enumerate(trace):
+                reward = int(step.accept.item())
                 conf = torch.softmax(step.logits[0, -1], -1)[step.token.item()].item()
+                confs.append(conf)
                 # append to both buffers
-                rl_buffer.append(
+                dropped = rl_buffer.append(
                     hidden=step.hidden[0, -1].to(device, dtype),
                     token=int(step.token.item()),
                     reward=reward,
                     conf=conf,
                 )
+                if dropped:
+                    buf_drops += 1
                 verifier_buffer.append(
                     hidden=step.hidden[0, -1].to(device, dtype),
                     token=int(step.token.item()),
@@ -145,6 +191,31 @@ def main(args: Optional[argparse.Namespace] = None):
                         args.baseline_momentum * baseline
                         + (1 - args.baseline_momentum) * reward
                     )
+                tot_tokens_seen += 1
+                tot_tokens_accepted += reward
+
+                if dbg_f:
+                    dbg_f.write(
+                        json.dumps(
+                            {
+                                "prompt_idx": idx,
+                                "tok_pos": tok_pos,
+                                "token_id": int(step.token.item()),
+                                "token_str": tok.decode(int(step.token.item())),
+                                "conf": conf,
+                                "accept": reward,
+                            }
+                        )
+                        + "\n"
+                    )
+
+            draft_len = len(trace)
+            accepted_len = sum(int(s.accept.item()) for s in trace)
+            avg_conf = sum(confs) / len(confs) if confs else 0.0
+            min_conf = min(confs) if confs else 0.0
+            max_conf = max(confs) if confs else 0.0
+            rl_size = len(rl_buffer)
+            rl_accepts = rl_buffer.accepted_count()
 
             if rl_buffer.accepted_count() >= args.fast_batch:
                 ## FAST (REINFORCE) update on *accepted* only
@@ -152,6 +223,7 @@ def main(args: Optional[argparse.Namespace] = None):
                 enable_lora_grads(model.base_model, "lora_S", True)
                 enable_lora_grads(model.base_model, "lora_D", False)
                 fast_opt.zero_grad(set_to_none=True)
+                t_fast0 = time.time()
 
                 h = fast_batch["hidden"].to(device, dtype)
                 tok_b = fast_batch["token"].to(device)
@@ -166,8 +238,9 @@ def main(args: Optional[argparse.Namespace] = None):
                 adv = (r - baseline).detach()
                 loss_fast = -(adv * log_pi).mean()
                 loss_fast.backward()
-                torch.nn.utils.clip_grad_norm_(fast_params, 1.0)
+                fast_grad_norm = float(torch.nn.utils.clip_grad_norm_(fast_params, 1.0).item())
                 fast_opt.step()
+                fast_time_ms = (time.time() - t_fast0) * 1000
 
                 # re-freeze for safety
                 enable_lora_grads(model.base_model, "lora_S", False)
@@ -186,6 +259,7 @@ def main(args: Optional[argparse.Namespace] = None):
                     enable_lora_grads(model.base_model, "lora_S", False)
                     enable_lora_grads(model.base_model, "lora_D", True)
                     slow_opt.zero_grad(set_to_none=True)
+                    t_slow = time.time()
 
                     h_all = slow_batch["hidden"].to(device, dtype)
                     tok_all = slow_batch["token"].to(device)
@@ -203,27 +277,51 @@ def main(args: Optional[argparse.Namespace] = None):
                     )
                     loss_slow = loss_ce + args.beta_kl * loss_kl
                     loss_slow.backward()
-                    torch.nn.utils.clip_grad_norm_(slow_params, 1.0)
+                    slow_grad_norm = float(torch.nn.utils.clip_grad_norm_(slow_params, 1.0).item())
                     slow_opt.step()
+                    slow_step_time_ms = (time.time() - t_slow) * 1000
                     # clear verifier buffer after training
                     verifier_buffer.clear(accepted_only=False)
                     # re-freeze everything
                     enable_lora_grads(model.base_model, "lora_S", False)
                     enable_lora_grads(model.base_model, "lora_D", False)
 
-            if (idx + 1) % 100 == 0:
-                accept_rate = float(sum(accept_list)) / max(len(accept_list), 1)
+            if (idx + 1) % args.log_every == 0:
+                accept_rate = tot_tokens_accepted / max(tot_tokens_seen, 1)
                 log_dict = {
                     "idx": idx + 1,
-                    "step": step_fast,
+                    "step_fast": step_fast,
+                    "tokens_seen": tot_tokens_seen,
+                    "tokens_accepted": tot_tokens_accepted,
                     "baseline": baseline,
                     "accept_rate": accept_rate,
-                    "time": time.time(),
+                    "spec_time_ms": spec_time_ms,
+                    "draft_len": draft_len,
+                    "accepted_len": accepted_len,
+                    "avg_conf": avg_conf,
+                    "min_conf": min_conf,
+                    "max_conf": max_conf,
+                    "rl_buffer": {
+                        "size": len(rl_buffer),
+                        "accepted": rl_buffer.accepted_count(),
+                        "capacity": rl_buffer.capacity,
+                        "drops": buf_drops,
+                    },
                 }
                 if "loss_fast" in locals():
                     log_dict["loss_fast"] = float(loss_fast.item())
-                if "loss_slow" in locals():
-                    log_dict["loss_slow"] = float(loss_slow.item())
+                if "fast_grad_norm" in locals():
+                    log_dict["fast_grad_norm"] = fast_grad_norm
+                if "fast_time_ms" in locals():
+                    log_dict["fast_time_ms"] = fast_time_ms
+                if "loss_ce" in locals():
+                    log_dict["loss_ce"] = float(loss_ce.item())
+                if "loss_kl" in locals():
+                    log_dict["loss_kl"] = float(loss_kl.item())
+                if "slow_grad_norm" in locals():
+                    log_dict["slow_grad_norm"] = slow_grad_norm
+                if "slow_step_time_ms" in locals():
+                    log_dict["slow_step_time_ms"] = slow_step_time_ms
                 log_f.write(json.dumps(log_dict) + "\n")
                 log_f.flush()
 
@@ -233,6 +331,9 @@ def main(args: Optional[argparse.Namespace] = None):
     ckpt_dir = Path("checkpoints/dvi_lora")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     model.base_model.save_pretrained(str(ckpt_dir))
+
+    if dbg_f:
+        dbg_f.close()
 
 
 if __name__ == "__main__":
